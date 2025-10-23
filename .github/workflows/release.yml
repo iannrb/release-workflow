@@ -1,0 +1,100 @@
+name: Generate Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Fetch all branches
+        run: git fetch origin main stage dev --tags
+
+      - name: Determine next semantic version
+        id: version
+        run: |
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          COMMITS=$(git log origin/main..origin/stage --pretty=format:"%s")
+
+          if echo "$COMMITS" | grep -q "BREAKING CHANGE"; then
+            BUMP="major"
+          elif echo "$COMMITS" | grep -qE "^feat"; then
+            BUMP="minor"
+          elif echo "$COMMITS" | grep -qE "^fix"; then
+            BUMP="patch"
+          else
+            BUMP="none"
+          fi
+
+          echo "bump=$BUMP" >> $GITHUB_OUTPUT
+
+          if [ "$BUMP" != "none" ]; then
+            NEXT_VERSION=$(npx semver $CURRENT_VERSION -i $BUMP)
+            echo "next_version=$NEXT_VERSION" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Stop if no relevant commits
+        if: steps.version.outputs.bump == 'none'
+        run: exit 0
+
+      - name: Create release branch and commit
+        id: release_branch
+        run: |
+          RELEASE_BRANCH="release/v${{ steps.version.outputs.next_version }}"
+          
+          git checkout -b "$RELEASE_BRANCH" origin/stage
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          
+          npm version ${{ steps.version.outputs.bump }} --git-tag-version=false
+          
+          git add package.json package-lock.json
+          git commit -m "chore(release): bump version to v${{ steps.version.outputs.next_version }}"
+          git push origin "$RELEASE_BRANCH" --set-upstream --force
+          
+          echo "release_branch=$RELEASE_BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Create PR to main
+        shell: bash
+        run: |
+          curl \
+          -X POST \
+          -H 'authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' \
+          -H "Accept: application/vnd.github.v3+json" \
+          https://api.github.com/repos/${{ github.repository }}/pulls \
+          -d '{"title":"release: v${{ steps.version.outputs.next_version }}","body":"Pull request automatizado da release para v${{ steps.version.outputs.next_version }}","head":"${{ steps.release_branch.outputs.release_branch }}","base":"main"}'
+
+      - name: Create PR to stage
+        shell: bash
+        run: |
+          curl \
+          -X POST \
+          -H 'authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' \
+          -H "Accept: application/vnd.github.v3+json" \
+          https://api.github.com/repos/${{ github.repository }}/pulls \
+          -d '{"title":"release: v${{ steps.version.outputs.next_version }}","body":"Pull request automatizado da release para v${{ steps.version.outputs.next_version }}","head":"${{ steps.release_branch.outputs.release_branch }}","base":"stage"}'
+
+      - name: Create PR to dev
+        shell: bash
+        run: |
+          curl \
+          -X POST \
+          -H 'authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' \
+          -H "Accept: application/vnd.github.v3+json" \
+          https://api.github.com/repos/${{ github.repository }}/pulls \
+          -d '{"title":"release: v${{ steps.version.outputs.next_version }}","body":"Pull request automatizado da release para v${{ steps.version.outputs.next_version }}","head":"${{ steps.release_branch.outputs.release_branch }}","base":"dev"}'
